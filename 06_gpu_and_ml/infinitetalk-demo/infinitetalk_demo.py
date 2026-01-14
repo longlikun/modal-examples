@@ -300,9 +300,8 @@ class InfiniteTalkModel:
             with open(json_path, "w") as f:
                 json.dump(input_data, f)
 
-            # 输出目录
-            output_dir = temp_path / "output"
-            output_dir.mkdir()
+            # 输出路径前缀 (不创建文件夹，因为脚本会把这个当前缀并自动添加 .mp4 后缀)
+            output_prefix = temp_path / "output"
 
             # 构建推理命令
             cmd = [
@@ -317,7 +316,7 @@ class InfiniteTalkModel:
                 "--mode", "streaming",
                 "--motion_frame", str(motion_frame),
                 "--num_persistent_param_in_dit", "0",  # 低显存模式
-                "--save_file", str(output_dir),
+                "--save_file", str(output_prefix),
             ]
 
             print(f"📝 Running command: {' '.join(cmd)}")
@@ -350,11 +349,15 @@ class InfiniteTalkModel:
             print(f"✓ Generation complete")
 
             # 查找输出视频
-            video_files = list(output_dir.glob("**/*.mp4"))
-            if not video_files:
-                raise FileNotFoundError("No output video found")
-
-            output_video = video_files[0]
+            # 脚本生成的视频应该是 output.mp4
+            output_video = temp_path / "output.mp4"
+            
+            if not output_video.exists():
+                # 尝试查找任何 mp4
+                video_files = list(temp_path.glob("*.mp4"))
+                if not video_files:
+                    raise FileNotFoundError(f"No output video found at {output_video} or anywhere in temp dir")
+                output_video = video_files[0]
             print(f"📹 Output video: {output_video}")
 
             return output_video.read_bytes()
