@@ -53,6 +53,8 @@ from zoneinfo import ZoneInfo
 
 import modal
 
+MINUTES = 60  # seconds
+
 app = modal.App("example-vllm-throughput")
 
 # Many batch jobs work nicely as scripts -- code that is run
@@ -125,7 +127,7 @@ def main(lookback: int = 7, wait_for_results: bool = True):
 # into a remote Modal Function!
 
 
-@app.function()  # simple function, only Modal and stdlib, so no config required!
+@app.function(timeout=15 * MINUTES)
 def orchestrate(lookback: int) -> list[modal.FunctionCall]:
     llm = Vllm()
 
@@ -346,7 +348,13 @@ class Vllm:
 # in our project by putting it in a separate container Image.
 
 data_proc_image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
-    "edgartools==5.8.3"
+    # pin transitive deps to avoid surprises like this one:
+    # https://www.edgartools.io/pandas-3-0-and-edgartools/
+    "edgartools==5.8.3",
+    "httpx==0.28.1",
+    "httpxthrottlecache==0.3.0",
+    "pandas<3",
+    "pyrate-limiter==3.9.0",
 )
 
 # Instead of hitting the SEC's EDGAR Feed API every time we want to run a job,
@@ -397,7 +405,10 @@ def transform(folder: str | None) -> list[Filing]:
 
 
 @app.function(
-    volumes={data_root: sec_edgar_feed}, scaledown_window=5, image=data_proc_image
+    volumes={data_root: sec_edgar_feed},
+    scaledown_window=5,
+    image=data_proc_image,
+    timeout=10 * MINUTES,
 )
 def _transform_filing_batch(raw_filing_paths: list[Path]) -> list[Filing | None]:
     from edgar.sgml import FilingSGML
@@ -445,7 +456,9 @@ scraper_image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
 # We add [retries](https://modal.com/docs/guide/retries)
 # via our Modal decorator as well, so that we can tolerate temporary outages or rate limits.
 
-# Note that we also attach the same Volume used in the `transform` Functions above.
+# Note that we also attach the same Volume used in the `transform` Functions above
+# and we explicitly [`.commit`](https://modal.com/docs/reference/modal.Volume#commit) our writes
+# so that they will be visible to future containers running `transform`.
 
 
 @app.function(
@@ -458,21 +471,21 @@ scraper_image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
 def extract(day: dt.date) -> str | None:
     target_folder = str(day)
     day_dir = data_root / target_folder
+    daily_name = f"{day:%Y%m%d}.nc.tar.gz"
+    tar_path = day_dir / daily_name
 
     # If the folder doesn't exist yet, try downloading the day's tarball
-    if not day_dir.exists():
+    if not tar_path.exists():
         print(f"Looking for data for {day} in SEC EDGAR Feed")
         ok = _download_from_sec_edgar(day, day_dir)
         if not ok:
             return None
 
-    daily_name = f"{day:%Y%m%d}.nc.tar.gz"
-    tar_path = day_dir / daily_name
-
     if not any(p.suffix == ".nc" for p in day_dir.iterdir()):
         print(f"Loading data for {day} from {tar_path}")
         _extract_tarfile(tar_path, day_dir)
 
+    sec_edgar_feed.commit()
     print(f"Data for {day} loaded")
 
     return target_folder
@@ -519,7 +532,7 @@ def clean_xml(xml: str) -> str:
     return xml.strip()
 
 
-def truncate_head_tail(text: str, head: int = 30000, tail: int = 3000) -> str:
+def truncate_head_tail(text: str, head: int = 13_000, tail: int = 2_000) -> str:
     if len(text) <= head + tail:
         return text
     return text[:head].rstrip() + "\n\n[...TRUNCATED...]\n\n" + text[-tail:].lstrip()
